@@ -1,110 +1,45 @@
-import os
-import re
-import time
-import PyPDF2
+import streamlit as st
 import pandas as pd
-from flask import Flask, render_template, request, send_file, flash, redirect
-from werkzeug.utils import secure_filename
+import pdfplumber
+import io
 
-app = Flask(__name__)
-app.secret_key = "kunci_rahasia_bebas"
-UPLOAD_FOLDER = 'uploads'
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+st.set_page_config(page_title="Konverter PDF GKP", layout="wide")
 
-# Pastikan folder upload otomatis terbuat
-if not os.path.exists(UPLOAD_FOLDER):
-    os.makedirs(UPLOAD_FOLDER)
+st.title("📄 Konverter PDF ke Excel - Wilayah 4")
+st.write("Gunakan aplikasi ini untuk mengubah data jemaat dari PDF ke Excel secara otomatis.")
 
-def extract_church_data(pdf_path):
-    text = ""
-    with open(pdf_path, "rb") as f:
-        reader = PyPDF2.PdfReader(f)
-        for page in reader.pages:
-            text += page.extract_text() + "\n"
+# Upload file
+uploaded_file = st.file_uploader("Unggah file Wilayah 4.pdf", type="pdf")
 
-    # Split berdasarkan angka di awal baris (mendukung '1 ALFRED' atau '1ALFRED')
-    entries = re.split(r'\n(?=\d+\s*[A-Z])', text)
-    
-    results = []
-    for entry in entries:
-        clean_entry = re.sub(r'\s+', ' ', entry).strip()
+if uploaded_file is not None:
+    with st.spinner('Sedang memproses data jemaat...'):
+        all_data = []
+        with pdfplumber.open(uploaded_file) as pdf:
+            for page in pdf.pages:
+                table = page.extract_table()
+                if table:
+                    for row in table:
+                        # Membersihkan baris dari karakter kosong/None
+                        clean_row = [str(item).replace('\n', ' ') if item else "" for item in row]
+                        if any(clean_row):
+                            all_data.append(clean_row)
         
-        # Pattern untuk Nama, Usia, Hubungan, dan Status Baptis Awal
-        pattern = r'^(\d+)\s*(.*?)\s*\(\s*(\d+)\s*Th\)-\s*([A-Za-z\s]+?)(?:\s*\d+)?\s*(Sudah|Belum)'
-        match = re.search(pattern, clean_entry)
-        
-        if match:
-            no, name, age, role, b_status = match.groups()
+        if all_data:
+            # Gunakan baris pertama sebagai header atau definisikan sendiri
+            df = pd.DataFrame(all_data)
             
-            # Memisahkan sisa data untuk mencari status Sidi
-            parts = re.split(r'(Sudah|Belum)', clean_entry)
-            
-            try:
-                # Bagian Baptis (setelah 'Sudah/Belum' pertama)
-                b_info = parts[2] if len(parts) > 2 else ""
-                # Bagian Sidi (setelah 'Sudah/Belum' kedua)
-                s_status = parts[3] if len(parts) > 3 else "-"
-                s_info = parts[4] if len(parts) > 4 else ""
-                
-                # Pola Tanggal: 01 Jan 2024
-                date_pat = r'(\d{2}\s[A-Z][a-z]{2}\s\d{4})'
-                
-                b_date_search = re.search(date_pat, b_info)
-                b_date = b_date_search.group(0) if b_date_search else "-"
-                
-                s_date_search = re.search(date_pat, s_info)
-                s_date = s_date_search.group(0) if s_date_search else "-"
+            st.subheader("Pratinjau Data")
+            st.dataframe(df.head(10))
 
-                results.append({
-                    "No": no,
-                    "Nama Lengkap": name.strip(),
-                    "Usia": age,
-                    "Hubungan": role.strip(),
-                    "Status Baptis": b_status,
-                    "Tanggal Baptis": b_date,
-                    "Status Sidi": s_status,
-                    "Tanggal Sidi": s_date
-                })
-            except:
-                continue
+            # Fungsi konversi ke Excel
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False, header=False)
             
-    return pd.DataFrame(results)
-
-@app.route('/')
-def index():
-    return render_template('index.html')
-
-@app.route('/upload', methods=['POST'])
-def upload_file():
-    if 'file' not in request.files:
-        flash('File tidak ditemukan')
-        return redirect(request.url)
-    
-    file = request.files['file']
-    if file and file.filename.endswith('.pdf'):
-        filename = secure_filename(file.filename)
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(filepath)
-        
-        try:
-            # 1. Ekstrak data
-            df = extract_church_data(filepath)
-            
-            # 2. Jeda estetika agar progress bar di web terlihat (1.5 detik)
-            time.sleep(1.5)
-            
-            # 3. Simpan ke Excel
-            excel_filename = filename.replace('.pdf', '.xlsx')
-            excel_path = os.path.join(app.config['UPLOAD_FOLDER'], excel_filename)
-            df.to_excel(excel_path, index=False, engine='openpyxl')
-            
-            return send_file(excel_path, as_attachment=True)
-        except Exception as e:
-            flash(f'Error: {str(e)}')
-            return redirect(request.url)
-            
-    flash('Gunakan format .pdf')
-    return redirect(request.url)
-
-if __name__ == '__main__':
-    app.run(port=5000, debug=True)
+            st.download_button(
+                label="📥 Unduh Hasil Excel",
+                data=output.getvalue(),
+                file_name="Data_Jemaat_Wilayah_4.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            st.success("Data siap diunduh!")
